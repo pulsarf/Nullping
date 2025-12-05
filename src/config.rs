@@ -7,6 +7,8 @@ use clap::Parser;
     about = "The first and actual Nullping exploit implementation for WebSocket servers, that actually works for misconfigured servers"
 )]
 pub(crate) struct Args {
+    #[arg(long, default_value_t = false, help = "Use tungstenite")]
+    pub use_tungstenite: bool,
     #[arg(long,
         default_value_t = String::from("localhost"),
         help = "Target URL"

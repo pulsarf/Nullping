@@ -95,8 +95,6 @@ Masking key: {:?}
 
         frame.push((self.mask as u8) << 7);
 
-        println!("{:x?}", (self.mask as u8) << 7);
-
         if self.len == 126 {
             frame.push((self.extended_length_if_126_or_127 >> 8) as u8);
             frame.push(self.extended_length_if_126_or_127 as u8);

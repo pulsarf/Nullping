@@ -2,6 +2,8 @@ use std::{io::Read, net::TcpStream, process::exit, thread::sleep, time::Duration
 
 use log::{error, info};
 
+use tungstenite::{connect, stream::MaybeTlsStream};
+
 mod config;
 mod frame;
 mod handshake;
@@ -14,18 +16,35 @@ use clap::Parser;
 use crate::handshake::Handshake;
 use payload::Payload;
 
-fn get_stream() -> TcpStream {
+fn get_stream() -> Box<TcpStream> {
     let args = Args::parse();
 
-    let socket_addr = format!("{}:{}", args.address, args.port);
+    let socket_addr = if args.use_tungstenite {
+        format!("{}://{}:{}", args.protocol, args.address, args.port)
+    } else {
+        format!("{}:{}", args.address, args.port)
+    };
 
     info!("Connecting to {}", socket_addr);
 
-    TcpStream::connect(socket_addr).unwrap_or_else(|f| {
+    if args.use_tungstenite {
+        let (socket, _) = connect(socket_addr).unwrap_or_else(|f| {
+            error!("Connection failed! Error: {f:?}");
+
+            exit(0)
+        });
+
+        return match socket.into_inner() {
+            MaybeTlsStream::Plain(socket) => Box::new(socket),
+            _ => unreachable!(),
+        };
+    }
+
+    Box::new(TcpStream::connect(socket_addr).unwrap_or_else(|f| {
         error!("Connection failed! Error: {f:?}");
 
         exit(0)
-    })
+    }))
 }
 
 fn set_write_timeout(stream: &mut TcpStream) {
@@ -49,6 +68,10 @@ fn disable_nagle(stream: &mut TcpStream) {
 fn perform_handshake(stream: TcpStream) {
     let args = Args::parse();
 
+    if args.use_tungstenite {
+        return;
+    }
+
     info!(
         "Performing WebSocket handshake with headers
 Sec-WebSocket-Key: {}
@@ -64,6 +87,8 @@ GET {} HTTP/1.1
 }
 
 fn wait_confirm(stream: &mut TcpStream) {
+    info!("Starting confirmation wait");
+
     let mut buf = [0u8; 256];
 
     stream.read(&mut buf).unwrap_or_else(|_| {
@@ -79,6 +104,8 @@ fn wait_confirm(stream: &mut TcpStream) {
 }
 
 fn send_payload(stream: &mut TcpStream) {
+    info!("Sending payload");
+
     let mut payload = Payload::new(stream.try_clone().unwrap());
 
     payload.send();
@@ -95,10 +122,16 @@ fn main() {
 
     let mut stream = get_stream();
 
+    info!("Connected! Passing away the socket (lmao what)");
+
     disable_nagle(&mut stream);
     set_write_timeout(&mut stream);
     perform_handshake(stream.try_clone().unwrap());
-    wait_confirm(&mut stream);
+
+    if !Args::parse().use_tungstenite {
+        wait_confirm(&mut stream);
+    }
+
     send_payload(&mut stream);
 
     loop {
